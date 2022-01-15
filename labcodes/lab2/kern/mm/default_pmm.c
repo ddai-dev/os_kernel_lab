@@ -134,15 +134,27 @@ default_alloc_pages(size_t n) {
             break;
         }
     }
+
     if (page != NULL) {
-        list_del(&(page->page_link));
-        if (page->property > n) {
-            struct Page *p = page + n;
-            p->property = page->property - n;
-            list_add(&free_list, &(p->page_link));
-    }
+        /**
+         * if the matched block size is bigger than what we ask,
+         * create the new head page indicate the remain memory block,
+         * add the new head page after the old one, we will delete the old one later
+        */
+
+       if(page->property > n) {
+          struct Page *p = page + n;
+          p->property = page->property - n;
+          SetPageProperty(p);
+          list_add_after(&(page->page_link), &(p->page_link));
+       }
+
+        // 2 reduce nr_free, clear the old head page property 
+        // delete it from free_list (also include the page->property == n)
         nr_free -= n;
         ClearPageProperty(page);
+        list_del(&(page->page_link));
+
     }
     return page;
 }
@@ -150,32 +162,55 @@ default_alloc_pages(size_t n) {
 static void
 default_free_pages(struct Page *base, size_t n) {
     assert(n > 0);
+    
+    // set pointer "p" pointing to the start page of the memory block we gonna free
     struct Page *p = base;
+
+    // give "unused" property to every page in the block
     for (; p != base + n; p ++) {
         assert(!PageReserved(p) && !PageProperty(p));
         p->flags = 0;
         set_page_ref(p, 0);
     }
+
     base->property = n;
     SetPageProperty(base);
+
+    // go through the whole free_list to find the appropriate position to insert
+    // the head page of the new block we gonna free, and merge the blocks if needed
     list_entry_t *le = list_next(&free_list);
     while (le != &free_list) {
         p = le2page(le, page_link);
         le = list_next(le);
-        if (base + base->property == p) {
-            base->property += p->property;
+
+        // we need to define le_prev, cause we might delete le from free_list when merging
+        //list_entry_t *le_prev = list_prev(le);
+
+        if(base + base->property == p){ // 被释放的空闲块后面紧接着空闲块 p
+            base->property += p->property; // 合并后面的空闲块
             ClearPageProperty(p);
-            list_del(&(p->page_link));
-        }
-        else if (p + p->property == base) {
-            p->property += base->property;
+            list_del(&(p->page_link)); // 释放掉后面的空闲块 p (因为已经合并了)
+        }else if (p + p->property == base){ // 被释放的空闲块前面紧跟着空闲块 p
+            p->property += base->property; // 合并前面的空闲块 p
             ClearPageProperty(base);
-            base = p;
-            list_del(&(p->page_link));
+            base = p;                     // 前面的空闲块 p 成为第一页
+            list_del(&(p->page_link));    // 释放掉自己
         }
     }
+
     nr_free += n;
-    list_add(&free_list, &(base->page_link));
+
+    le = list_next(&free_list);
+    while (le != &free_list) {
+        p = le2page(le, page_link);
+        if (base + base->property <= p) {// 找到第一个 小于 p 的节点, 其实就是最接近 p 的节点
+            assert(base + base->property !=p);
+            break;
+        }
+        le = list_next(le);
+    }
+
+    list_add_before(le, &(base->page_link));
 }
 
 static size_t
@@ -215,6 +250,8 @@ basic_check(void) {
     assert((p0 = alloc_page()) != NULL);
     assert((p1 = alloc_page()) != NULL);
     assert((p2 = alloc_page()) != NULL);
+
+
 
     assert(alloc_page() == NULL);
 
